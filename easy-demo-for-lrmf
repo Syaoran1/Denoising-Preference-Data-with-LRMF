@@ -1,0 +1,99 @@
+filename = '';
+R1 = readmatrix(filename, 'Range', 'A:J');
+[m, n] = size(R1);
+M = double(~isnan(R1));  % 掩码
+R1(isnan(R1)) = 0;
+
+
+rank_list = [2, 4, 6, 8];
+lr_list = [1e-4, 3e-4, 5e-4];
+rho_types = {'sqrt', 'linear'};
+
+best_rmse = Inf;
+best_config = struct();
+
+
+results = [];
+
+for r = 1:length(rank_list)
+    for l = 1:length(lr_list)
+        for t = 1:length(rho_types)
+            rank_k = rank_list(r);
+            lr = lr_list(l);
+            rho_mode = rho_types{t};
+
+            
+            col_mu = sum(R1,1) ./ max(sum(M,1),1);
+            col_std = sqrt(sum(((R1 - col_mu).^2).*M,1) ./ max(sum(M,1)-1,1));
+            Z = (R1 - col_mu) ./ max(col_std, eps);
+            Z = Z .* M;
+            user_var = sum(Z.^2,2) ./ max(sum(M,2)-1,1);
+            switch rho_mode
+                case 'sqrt'
+                    rho = 1 ./ (1 + sqrt(user_var));
+                case 'linear'
+                    rho = 1 ./ (1 + user_var);
+            end
+            rho = rho / mean(rho);  % 归一化
+            rho = reshape(rho, 1, m);
+
+            %% --- 初始化 ---
+            lambda_u = 1e-4; lambda_s = 1e-4;
+            num_iters = 300;
+            U = randn(rank_k, m) * 0.5;
+            S = randn(rank_k, n) * 0.5;
+            loss_list = zeros(num_iters,1);
+
+            %% --- 训练 ---
+            for iter = 1:num_iters
+                U_new = U; S_new = S;
+
+                for i = 1:m
+                    err_i = (R1(i,:) - U(:,i)'*S) .* M(i,:);
+                    gradU = rho(i) * (S * err_i');
+                    U_new(:,i) = U(:,i) - lr * (lambda_u*U(:,i) - gradU);
+                end
+                for j = 1:n
+                    err_j = (R1(:,j) - U'*S(:,j)) .* M(:,j);
+                    gradS = (U .* rho) * err_j;
+                    S_new(:,j) = S(:,j) - lr * (lambda_s*S(:,j) - gradS);
+                end
+
+                U = U_new; S = S_new;
+                R_pred = U' * S;
+                loss = sqrt(sum(((R1 - R_pred).^2) .* M, 'all') / sum(M(:)));
+                loss_list(iter) = loss;
+
+                if iter > 1 && abs(loss_list(iter)-loss_list(iter-1)) < 1e-6
+                    break;
+                end
+            end
+
+            
+            fprintf('rank=%d, lr=%.0e, rho=%s => RMSE = %.4f\n', rank_k, lr, rho_mode, loss);
+            results(end+1,:) = [rank_k, lr, double(strcmp(rho_mode,'linear')), loss];
+
+            if loss < best_rmse
+                best_rmse = loss;
+                best_config.rank_k = rank_k;
+                best_config.lr = lr;
+                best_config.rho_mode = rho_mode;
+                best_config.R_pred = R_pred;
+            end
+        end
+    end
+end
+
+
+writematrix(best_config.R_pred, 'best_newtrain_pred_mix.xlsx');
+fprintf('\nBest Config: rank=%d | lr=%.0e | rho=%s | RMSE=%.4f\n', ...
+    best_config.rank_k, best_config.lr, best_config.rho_mode, best_rmse);
+
+
+% bar plot of all RMSEs
+figure;
+bar(results(:,4));
+xticklabels(compose('r=%d lr=%.0e %s', results(:,1), results(:,2), ...
+    string(results(:,3)==1, 'linear', 'sqrt')));
+xtickangle(45); ylabel('RMSE'); title('All Configurations');
+
